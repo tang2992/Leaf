@@ -4,7 +4,9 @@ import com.sankuai.inf.leaf.IDGen;
 import com.sankuai.inf.leaf.common.Result;
 import com.sankuai.inf.leaf.common.Status;
 import com.sankuai.inf.leaf.segment.dao.IDAllocDao;
-import com.sankuai.inf.leaf.segment.model.*;
+import com.sankuai.inf.leaf.segment.model.LeafAlloc;
+import com.sankuai.inf.leaf.segment.model.Segment;
+import com.sankuai.inf.leaf.segment.model.SegmentBuffer;
 import org.perf4j.StopWatch;
 import org.perf4j.slf4j.Slf4JStopWatch;
 import org.slf4j.Logger;
@@ -14,8 +16,13 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class SegmentIDGenImpl implements IDGen {
-    private static final Logger logger = LoggerFactory.getLogger(SegmentIDGenImpl.class);
+/**
+ * 滚动流水，超过最大流水后，重新从1开始计数，用于需要较短位数的流水，但是流水前有其它标识符保证流水号不重复的场景。例如：
+ * a. 资金方请求流水号，部分资金方要求请求流水号以yyyyMMdd的格式开头，这时，我们可以在后面使用较短位数的流水信息
+ * b.
+ */
+public class SegmentRollIDGenImpl implements IDGen {
+    private static final Logger logger = LoggerFactory.getLogger(SegmentRollIDGenImpl.class);
 
     /**
      * IDCache未初始化成功时的异常码
@@ -30,6 +37,10 @@ public class SegmentIDGenImpl implements IDGen {
      */
     private static final long EXCEPTION_ID_TWO_SEGMENTS_ARE_NULL = -3;
     /**
+     * SegmentBuffer中的两个Segment均未从DB中装载时的异常码
+     */
+    private static final long EXCEPTION_ID_OVERFLOW = -4;
+    /**
      * 最大步长不超过100,0000
      */
     private static final int MAX_STEP = 1000000;
@@ -37,10 +48,18 @@ public class SegmentIDGenImpl implements IDGen {
      * 一个Segment维持时间为15分钟
      */
     private static final long SEGMENT_DURATION = 15 * 60 * 1000L;
+    /**
+     * 最大序列长度
+     */
+//    private final long sequenceMask = ~(-1L << 64);
     private ExecutorService service = new ThreadPoolExecutor(5, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(), new UpdateThreadFactory());
     private volatile boolean initOK = false;
     private Map<String, SegmentBuffer> cache = new ConcurrentHashMap<String, SegmentBuffer>();
+
     private IDAllocDao dao;
+    private long sequenceMask;
+
+
 
     public static class UpdateThreadFactory implements ThreadFactory {
 
@@ -192,8 +211,7 @@ public class SegmentIDGenImpl implements IDGen {
             buffer.setMinStep(leafAlloc.getStep());//leafAlloc的step为DB中的step
         }
         // must set value before set max
-        long diff = leafAlloc.getMaxId() - buffer.getStep();
-        long value = diff > 0 ? diff : 1;   // 要避免越界重新计数产生负数的情况
+        long value = leafAlloc.getMaxId() - buffer.getStep();
         segment.getValue().set(value);
         segment.setMax(leafAlloc.getMaxId());
         segment.setStep(buffer.getStep());
@@ -230,9 +248,9 @@ public class SegmentIDGenImpl implements IDGen {
                         }
                     });
                 }
-                long value = segment.getValue().getAndIncrement();
-                if (value < segment.getMax()) {
-                    return new Result(value, Status.SUCCESS);
+                Result result = getIDResult(segment);
+                if (result != null) {
+                    return result;
                 }
             } finally {
                 buffer.rLock().unlock();
@@ -241,9 +259,9 @@ public class SegmentIDGenImpl implements IDGen {
             buffer.wLock().lock();
             try {
                 final Segment segment = buffer.getCurrent();
-                long value = segment.getValue().getAndIncrement();
-                if (value < segment.getMax()) {
-                    return new Result(value, Status.SUCCESS);
+                Result result = getIDResult(segment);
+                if (result != null) {
+                    return result;
                 }
                 if (buffer.isNextReady()) {
                     buffer.switchPos();
@@ -256,6 +274,24 @@ public class SegmentIDGenImpl implements IDGen {
                 buffer.wLock().unlock();
             }
         }
+    }
+
+    /**
+     * 获取ID
+     * @param segment
+     * @return
+     */
+    private Result getIDResult(Segment segment) {
+        long value = segment.getValue().getAndIncrement();
+        value = value & sequenceMask;
+        if (value == 0) {
+            // 如果变成0了，说明流水号用尽了，这个时候要报错
+            return new Result(EXCEPTION_ID_OVERFLOW, Status.EXCEPTION);
+        }
+        if (value < segment.getMax()) {
+            return new Result(value, Status.SUCCESS);
+        }
+        return null;
     }
 
     private void waitAndSleep(SegmentBuffer buffer) {

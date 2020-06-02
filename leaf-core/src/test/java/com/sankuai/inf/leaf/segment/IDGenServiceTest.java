@@ -24,9 +24,9 @@ public class IDGenServiceTest {
 
         // Config dataSource
         dataSource = new DruidDataSource();
-        dataSource.setUrl(properties.getProperty("jdbc.url"));
-        dataSource.setUsername(properties.getProperty("jdbc.username"));
-        dataSource.setPassword(properties.getProperty("jdbc.password"));
+        dataSource.setUrl(properties.getProperty("leaf.jdbc.url"));
+        dataSource.setUsername(properties.getProperty("leaf.jdbc.username"));
+        dataSource.setPassword(properties.getProperty("leaf.jdbc.password"));
         dataSource.init();
 
         // Config Dao
@@ -49,4 +49,9 @@ public class IDGenServiceTest {
        dataSource.close();
     }
 
+    @Test
+    public void bit() {
+        long sequenceMask = ~(-1L << 12);
+        System.out.println(sequenceMask);
+    }
 }
